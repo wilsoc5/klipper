@@ -554,7 +554,8 @@ class MCU:
         self._config_cmds = updated_cmds
 
         # Calculate config CRC
-        self._config_crc = zlib.crc32('\n'.join(self._config_cmds)) & 0xffffffff
+        self._config_crc = zlib.crc32(
+            '\n'.join(self._config_cmds).encode()) & 0xffffffff
         self.add_config_cmd("finalize_config crc=%d" % (self._config_crc,))
     def _send_config(self):
         msg = self.create_command("get_config")

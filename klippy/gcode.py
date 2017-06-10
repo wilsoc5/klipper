@@ -122,7 +122,7 @@ class GCodeParser:
         data = os.read(self.fd, 4096)
         self.input_log.append((eventtime, data))
         self.bytes_read += len(data)
-        lines = data.split('\n')
+        lines = data.decode().split('\n')
         lines[0] = self.partial_input + lines[0]
         self.partial_input = lines.pop()
         if self.is_processing_data:

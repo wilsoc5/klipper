@@ -306,7 +306,7 @@ class MessageParser:
         if decompress:
             data = zlib.decompress(data)
         self.raw_identify_data = data
-        data = json.loads(data)
+        data = json.loads(data.decode())
         messages = data.get('messages')
         commands = data.get('commands')
         responses = data.get('responses')

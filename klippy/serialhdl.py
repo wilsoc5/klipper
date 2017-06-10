@@ -147,7 +147,7 @@ class SerialReader:
         sqstats = self.ffi_main.string(self.stats_buf)
         tstats = " est_clock=%.3f last_ack_time=%.3f last_ack_clock=%d" % (
             self.est_clock, self.last_ack_time, self.last_ack_clock)
-        return sqstats + tstats
+        return sqstats.decode() + tstats
     def _status_event(self, eventtime):
         self.send(self.status_cmd)
         return eventtime + 1.0
