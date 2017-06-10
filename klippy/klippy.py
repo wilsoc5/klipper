@@ -4,7 +4,11 @@
 # Copyright (C) 2016  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import sys, optparse, ConfigParser, logging, time, threading
+import sys, optparse, logging, time, threading
+try:
+    import configparser
+except:
+    import ConfigParser as configparser
 import gcode, toolhead, util, mcu, fan, heater, extruder, reactor, queuelogger
 import msgproto
 
@@ -46,7 +50,7 @@ Printer is shutdown
 """
 
 class ConfigWrapper:
-    error = ConfigParser.Error
+    error = configparser.Error
     class sentinel:
         pass
     def __init__(self, printer, section):
@@ -164,10 +168,10 @@ class Printer:
     def add_object(self, name, obj):
         self.objects[name] = obj
     def load_config(self):
-        self.fileconfig = ConfigParser.RawConfigParser()
+        self.fileconfig = configparser.RawConfigParser()
         res = self.fileconfig.read(self.conffile)
         if not res:
-            raise ConfigParser.Error("Unable to open config file %s" % (
+            raise configparser.Error("Unable to open config file %s" % (
                 self.conffile,))
         if self.bglogger is not None:
             ConfigLogger(self.fileconfig, self.bglogger)
@@ -183,12 +187,12 @@ class Printer:
         for section in self.fileconfig.sections():
             section = section.lower()
             if section not in valid_sections:
-                raise ConfigParser.Error("Unknown config file section '%s'" % (
+                raise configparser.Error("Unknown config file section '%s'" % (
                     section,))
             for option in self.fileconfig.options(section):
                 option = option.lower()
                 if (section, option) not in self.all_config_options:
-                    raise ConfigParser.Error(
+                    raise configparser.Error(
                         "Unknown option '%s' in section '%s'" % (
                             option, section))
     def connect(self, eventtime):
@@ -199,7 +203,7 @@ class Printer:
             self.mcu.connect()
             self.gcode.set_printer_ready(True)
             self.state_message = message_ready
-        except ConfigParser.Error as e:
+        except configparser.Error as e:
             logging.exception("Config error")
             self.state_message = "%s%s" % (str(e), message_restart)
             self.reactor.update_timer(self.stats_timer, self.reactor.NEVER)
