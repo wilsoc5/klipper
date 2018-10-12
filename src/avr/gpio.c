@@ -52,20 +52,32 @@ gpio_out_setup(uint8_t pin, uint8_t val)
     struct gpio_digital_regs *regs = GPIO2REGS(pin);
     if (! regs)
         goto fail;
-    uint8_t bit = GPIO2BIT(pin);
-    irqstatus_t flag = irq_save();
-    regs->out = val ? (regs->out | bit) : (regs->out & ~bit);
-    regs->mode |= bit;
-    irq_restore(flag);
-    return (struct gpio_out){ .regs=regs, .bit=bit };
+    struct gpio_out g = { .regs=regs, .bit=GPIO2BIT(pin) };
+    gpio_out_reset(g, val);
+    return g;
 fail:
     shutdown("Not an output pin");
 }
 
 void
-gpio_out_toggle(struct gpio_out g)
+gpio_out_reset(struct gpio_out g, uint8_t val)
+{
+    irqstatus_t flag = irq_save();
+    g.regs->out = val ? (g.regs->out | g.bit) : (g.regs->out & ~g.bit);
+    g.regs->mode |= g.bit;
+    irq_restore(flag);
+}
+
+void
+gpio_out_toggle_noirq(struct gpio_out g)
 {
     g.regs->in = g.bit;
+}
+
+void
+gpio_out_toggle(struct gpio_out g)
+{
+    gpio_out_toggle_noirq(g);
 }
 
 void
@@ -84,14 +96,20 @@ gpio_in_setup(uint8_t pin, int8_t pull_up)
     struct gpio_digital_regs *regs = GPIO2REGS(pin);
     if (! regs)
         goto fail;
-    uint8_t bit = GPIO2BIT(pin);
-    irqstatus_t flag = irq_save();
-    regs->out = pull_up > 0 ? (regs->out | bit) : (regs->out & ~bit);
-    regs->mode &= ~bit;
-    irq_restore(flag);
-    return (struct gpio_in){ .regs=regs, .bit=bit };
+    struct gpio_in g = { .regs=regs, .bit=GPIO2BIT(pin) };
+    gpio_in_reset(g, pull_up);
+    return g;
 fail:
     shutdown("Not an input pin");
+}
+
+void
+gpio_in_reset(struct gpio_in g, int8_t pull_up)
+{
+    irqstatus_t flag = irq_save();
+    g.regs->out = pull_up > 0 ? (g.regs->out | g.bit) : (g.regs->out & ~g.bit);
+    g.regs->mode &= ~g.bit;
+    irq_restore(flag);
 }
 
 uint8_t
@@ -263,7 +281,8 @@ static const uint8_t adc_pins[] PROGMEM = {
 #endif
 };
 
-static const uint8_t ADMUX_DEFAULT = 0x40;
+enum { ADMUX_DEFAULT = 0x40 };
+enum { ADC_ENABLE = (1<<ADPS0)|(1<<ADPS1)|(1<<ADPS2)|(1<<ADEN)|(1<<ADIF) };
 
 DECL_CONSTANT(ADC_MAX, 1023);
 
@@ -280,7 +299,7 @@ gpio_adc_setup(uint8_t pin)
     }
 
     // Enable ADC
-    ADCSRA = (1<<ADPS0)|(1<<ADPS1)|(1<<ADPS2)|(1<<ADEN);
+    ADCSRA = ADC_ENABLE;
 
     // Disable digital input for this pin
 #ifdef DIDR2
@@ -313,16 +332,18 @@ gpio_adc_sample(struct gpio_adc g)
         goto need_delay;
     last_analog_read = g.chan;
 
+    // Set the channel to sample
 #if defined(ADCSRB) && defined(MUX5)
-    // the MUX5 bit of ADCSRB selects whether we're reading from channels
-    // 0 to 7 (MUX5 low) or 8 to 15 (MUX5 high).
+    // The MUX5 bit of ADCSRB selects whether we're reading from
+    // channels 0 to 7 (MUX5 low) or 8 to 15 (MUX5 high).
     ADCSRB = ((g.chan >> 3) & 0x01) << MUX5;
 #endif
-
     ADMUX = ADMUX_DEFAULT | (g.chan & 0x07);
 
-    // start the conversion
-    ADCSRA |= 1<<ADSC;
+    // Start the sample
+    ADCSRA = ADC_ENABLE | (1<<ADSC);
+
+    // Schedule next attempt after sample is likely to be complete
 need_delay:
     return (13 + 1) * 128 + 200;
 }
@@ -349,29 +370,109 @@ gpio_adc_cancel_sample(struct gpio_adc g)
  ****************************************************************/
 
 #if CONFIG_MACH_atmega168 || CONFIG_MACH_atmega328
-static const uint8_t SS = GPIO('B', 2), SCK = GPIO('B', 5), MOSI = GPIO('B', 3);
+static const uint8_t SS = GPIO('B', 2), SCK = GPIO('B', 5);
+static const uint8_t MOSI = GPIO('B', 3), MISO = GPIO('B', 4);
 #elif CONFIG_MACH_atmega644p || CONFIG_MACH_atmega1284p
-static const uint8_t SS = GPIO('B', 4), SCK = GPIO('B', 7), MOSI = GPIO('B', 5);
+static const uint8_t SS = GPIO('B', 4), SCK = GPIO('B', 7);
+static const uint8_t MOSI = GPIO('B', 5), MISO = GPIO('B', 6);
 #elif CONFIG_MACH_at90usb1286 || CONFIG_MACH_at90usb646 || CONFIG_MACH_atmega1280 || CONFIG_MACH_atmega2560
-static const uint8_t SS = GPIO('B', 0), SCK = GPIO('B', 1), MOSI = GPIO('B', 2);
+static const uint8_t SS = GPIO('B', 0), SCK = GPIO('B', 1);
+static const uint8_t MOSI = GPIO('B', 2), MISO = GPIO('B', 3);
 #endif
 
-void
-spi_config(void)
+static void
+spi_init(void)
 {
-    gpio_out_setup(SS, 1);
+    if (!(GPIO2REGS(SS)->mode & GPIO2BIT(SS)))
+        // The SS pin must be an output pin (but is otherwise unused)
+        gpio_out_setup(SS, 0);
     gpio_out_setup(SCK, 0);
     gpio_out_setup(MOSI, 0);
+    gpio_in_setup(MISO, 0);
+
     SPCR = (1<<MSTR) | (1<<SPE);
+    SPSR = 0;
+}
+
+struct spi_config
+spi_setup(uint32_t bus, uint8_t mode, uint32_t rate)
+{
+    if (bus || mode > 3)
+        shutdown("Invalid spi_setup parameters");
+
+    // Make sure the SPI interface is enabled
+    spi_init();
+
+    // Setup rate
+    struct spi_config config = {0, 0};
+    if (rate >= (CONFIG_CLOCK_FREQ / 2)) {
+        config.spsr = (1<<SPI2X);
+    } else if (rate >= (CONFIG_CLOCK_FREQ / 4)) {
+        config.spcr = 0;
+    } else if (rate >= (CONFIG_CLOCK_FREQ / 8)) {
+        config.spcr = 1;
+        config.spsr = (1<<SPI2X);
+    } else if (rate >= (CONFIG_CLOCK_FREQ / 16)) {
+        config.spcr = 1;
+    } else if (rate >= (CONFIG_CLOCK_FREQ / 32)) {
+        config.spcr = 2;
+        config.spsr = (1<<SPI2X);
+    } else if (rate >= (CONFIG_CLOCK_FREQ / 64)) {
+        config.spcr = 2;
+    } else {
+        config.spcr = 3;
+    }
+
+    // Setup mode
+    config.spcr |= (1<<SPE) | (1<<MSTR);
+    switch(mode) {
+        case 0: {
+            // MODE 0 - CPOL=0, CPHA=0
+            break;
+        }
+        case 1: {
+            // MODE 1 - CPOL=0, CPHA=1
+            config.spcr |= (1<<CPHA);
+            break;
+        }
+        case 2: {
+            // MODE 2 - CPOL=1, CPHA=0
+            config.spcr |= (1<<CPOL);
+            break;
+        }
+        case 3: {
+            // MODE 3 - CPOL=1, CPHA=1
+            config.spcr |= (1<<CPOL) | (1<<CPHA);
+            break;
+        }
+    }
+
+    return config;
 }
 
 void
-spi_transfer(char *data, uint8_t len)
+spi_prepare(struct spi_config config)
 {
-    while (len--) {
-        SPDR = *data;
-        while (!(SPSR & (1<<SPIF)))
-            ;
-        *data++ = SPDR;
+    SPCR = config.spcr;
+    SPSR = config.spsr;
+}
+
+void
+spi_transfer(struct spi_config config, uint8_t receive_data
+             , uint8_t len, uint8_t *data)
+{
+    if (receive_data) {
+        while (len--) {
+            SPDR = *data;
+            while (!(SPSR & (1<<SPIF)))
+                ;
+            *data++ = SPDR;
+        }
+    } else {
+        while (len--) {
+            SPDR = *data++;
+            while (!(SPSR & (1<<SPIF)))
+                ;
+        }
     }
 }

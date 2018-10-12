@@ -4,7 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import extruder
 
 HINT_THERMAL = """
 See the 'verify_heater' section in config/example-extras.cfg
@@ -27,13 +26,21 @@ class HeaterCheck:
         self.met_target = False
         self.last_target = self.goal_temp = self.error = 0.
         self.fault_systime = self.printer.get_reactor().NEVER
+        self.check_timer = None
     def printer_state(self, state):
         if state == 'connect':
-            self.heater = extruder.get_printer_heater(
-                self.printer, self.heater_name)
+            if self.printer.get_start_args().get('debugoutput') is not None:
+                # Disable verify_heater if outputting to a debug file
+                return
+            pheater = self.printer.lookup_object('heater')
+            self.heater = pheater.lookup_heater(self.heater_name)
             logging.info("Starting heater checks for %s", self.heater_name)
             reactor = self.printer.get_reactor()
-            reactor.register_timer(self.check_event, reactor.NOW)
+            self.check_timer = reactor.register_timer(self.check_event,
+                                                      reactor.NOW)
+        elif state == 'shutdown' and self.check_timer is not None:
+            reactor = self.printer.get_reactor()
+            reactor.update_timer(self.check_timer, reactor.NEVER)
     def check_event(self, eventtime):
         temp, target = self.heater.get_temp(eventtime)
         if temp >= target - self.hysteresis:

@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math, logging
-import extruder, heater
+import heater
 
 class PIDCalibrate:
     def __init__(self, config):
@@ -18,33 +18,44 @@ class PIDCalibrate:
         heater_name = self.gcode.get_str('HEATER', params)
         target = self.gcode.get_float('TARGET', params)
         write_file = self.gcode.get_int('WRITE_FILE', params, 0)
+        pheater = self.printer.lookup_object('heater')
         try:
-            heater = extruder.get_printer_heater(self.printer, heater_name)
+            heater = pheater.lookup_heater(heater_name)
         except self.printer.config_error as e:
             raise self.gcode.error(str(e))
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
-        calibrate = ControlAutoTune(heater)
+        calibrate = ControlAutoTune(heater, target)
         old_control = heater.set_control(calibrate)
         try:
             heater.set_temp(print_time, target)
         except heater.error as e:
+            heater.set_control(old_control)
             raise self.gcode.error(str(e))
         self.gcode.bg_temp(heater)
         heater.set_control(old_control)
         if write_file:
             calibrate.write_file('/tmp/heattest.txt')
+        # Log and report results
         Kp, Ki, Kd = calibrate.calc_final_pid()
         logging.info("Autotune: final: Kp=%f Ki=%f Kd=%f", Kp, Ki, Kd)
         self.gcode.respond_info(
             "PID parameters: pid_Kp=%.3f pid_Ki=%.3f pid_Kd=%.3f\n"
-            "To use these parameters, update the printer config file with\n"
-            "the above and then issue a RESTART command" % (Kp, Ki, Kd))
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with these parameters and restart the printer." % (Kp, Ki, Kd))
+        # Store results for SAVE_CONFIG
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(heater_name, 'control', 'pid')
+        configfile.set(heater_name, 'pid_Kp', "%.3f" % (Kp,))
+        configfile.set(heater_name, 'pid_Ki', "%.3f" % (Ki,))
+        configfile.set(heater_name, 'pid_Kd', "%.3f" % (Kd,))
 
 TUNE_PID_DELTA = 5.0
 
 class ControlAutoTune:
-    def __init__(self, heater):
+    def __init__(self, heater, target):
         self.heater = heater
+        self.heater_max_power = heater.get_max_power()
+        self.calibrate_temp = target
         # Heating control
         self.heating = False
         self.peak = 0.
@@ -58,20 +69,22 @@ class ControlAutoTune:
     # Heater control
     def set_pwm(self, read_time, value):
         if value != self.last_pwm:
-            self.pwm_samples.append((read_time + heater.PWM_DELAY, value))
+            self.pwm_samples.append(
+                (read_time + self.heater.get_pwm_delay(), value))
             self.last_pwm = value
         self.heater.set_pwm(read_time, value)
-    def adc_callback(self, read_time, temp):
+    def temperature_update(self, read_time, temp, target_temp):
         self.temp_samples.append((read_time, temp))
-        if self.heating and temp >= self.heater.target_temp:
+        if self.heating and temp >= target_temp:
             self.heating = False
             self.check_peaks()
-        elif (not self.heating
-              and temp <= self.heater.target_temp - TUNE_PID_DELTA):
+            self.heater.alter_target(self.calibrate_temp - TUNE_PID_DELTA)
+        elif not self.heating and temp <= target_temp:
             self.heating = True
             self.check_peaks()
+            self.heater.alter_target(self.calibrate_temp)
         if self.heating:
-            self.set_pwm(read_time, self.heater.max_power)
+            self.set_pwm(read_time, self.heater_max_power)
             if temp < self.peak:
                 self.peak = temp
                 self.peak_time = read_time
@@ -80,7 +93,7 @@ class ControlAutoTune:
             if temp > self.peak:
                 self.peak = temp
                 self.peak_time = read_time
-    def check_busy(self, eventtime):
+    def check_busy(self, eventtime, smoothed_temp, target_temp):
         if self.heating or len(self.peaks) < 12:
             return True
         return False
@@ -97,8 +110,7 @@ class ControlAutoTune:
     def calc_pid(self, pos):
         temp_diff = self.peaks[pos][0] - self.peaks[pos-1][0]
         time_diff = self.peaks[pos][1] - self.peaks[pos-2][1]
-        max_power = self.heater.max_power
-        Ku = 4. * (2. * max_power) / (abs(temp_diff) * math.pi)
+        Ku = 4. * (2. * self.heater_max_power) / (abs(temp_diff) * math.pi)
         Tu = time_diff
 
         Ti = 0.5 * Tu
@@ -107,7 +119,7 @@ class ControlAutoTune:
         Ki = Kp / Ti
         Kd = Kp * Td
         logging.info("Autotune: raw=%f/%f Ku=%f Tu=%f  Kp=%f Ki=%f Kd=%f",
-                     temp_diff, max_power, Ku, Tu, Kp, Ki, Kd)
+                     temp_diff, self.heater_max_power, Ku, Tu, Kp, Ki, Kd)
         return Kp, Ki, Kd
     def calc_final_pid(self):
         cycle_times = [(self.peaks[pos][1] - self.peaks[pos-2][1], pos)

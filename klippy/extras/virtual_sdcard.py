@@ -19,6 +19,7 @@ class VirtualSD:
         self.work_timer = None
         # Register commands
         self.gcode = printer.lookup_object('gcode')
+        self.gcode.register_command('M21', None)
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
             self.gcode.register_command(cmd, getattr(self, 'cmd_' + cmd))
         for cmd in ['M28', 'M29', 'M30']:
@@ -26,6 +27,21 @@ class VirtualSD:
     def printer_state(self, state):
         if state == 'shutdown' and self.work_timer is not None:
             self.must_pause_work = True
+            try:
+                readpos = max(self.file_position - 1024, 0)
+                readcount = self.file_position - readpos
+                self.current_file.seek(readpos)
+                data = self.current_file.read(readcount + 128)
+            except:
+                logging.exception("virtual_sdcard shutdown read")
+                return
+            logging.info("Virtual sdcard (%d): %s\nUpcoming (%d): %s",
+                         readpos, repr(data[:readcount]),
+                         self.file_position, repr(data[readcount:]))
+    def stats(self, eventtime):
+        if self.work_timer is None:
+            return False, ""
+        return True, "sd_pos=%d" % (self.file_position,)
     def get_file_list(self):
         dname = self.sdcard_dirname
         try:
@@ -102,7 +118,7 @@ class VirtualSD:
         # Set SD position
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
-        pos = self.gcode.get_int('S', params)
+        pos = self.gcode.get_int('S', params, minval=0)
         self.file_position = pos
     def cmd_M27(self, params):
         # Report SD print status
@@ -113,6 +129,7 @@ class VirtualSD:
             self.file_position, self.file_size))
     # Background work timer
     def work_handler(self, eventtime):
+        logging.info("Starting SD card print (position %d)", self.file_position)
         self.reactor.unregister_timer(self.work_timer)
         try:
             self.current_file.seek(self.file_position)
@@ -136,12 +153,14 @@ class VirtualSD:
                     # End of file
                     self.current_file.close()
                     self.current_file = None
+                    logging.info("Finished SD card print")
                     self.gcode.respond("Done printing file")
                     break
                 lines = data.split('\n')
                 lines[0] = partial_input + lines[0]
                 partial_input = lines.pop()
                 lines.reverse()
+                self.reactor.pause(self.reactor.NOW)
                 continue
             # Dispatch command
             try:
@@ -155,6 +174,7 @@ class VirtualSD:
                 logging.exception("virtual_sdcard dispatch")
                 break
             self.file_position += len(lines.pop()) + 1
+        logging.info("Exiting SD card print (position %d)", self.file_position)
         self.work_timer = None
         return self.reactor.NEVER
 
