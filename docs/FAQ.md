@@ -27,7 +27,7 @@ Thanks. Kevin has a Patreon page at: https://www.patreon.com/koconnor
 If you know the steps per millimeter for the axis then use a
 calculator to divide 1.0 by steps_per_mm. Then round this number to
 six decimal places and place it in the config (six decimal places is
-nano-meter precision).
+micro-meter precision).
 
 The step_distance defines the distance that the axis will travel on
 each motor driver pulse. It can also be calculated from the axis
